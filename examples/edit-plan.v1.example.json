@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "videostitch.edit-plan.v1",
+  "id": "plan-example-social-cut",
+  "baseRevisionId": "replace-with-current-revision-id",
+  "name": "Social cut first pass",
+  "createdAt": "2026-08-12T19:00:00.000Z",
+  "provenance": "Example external agent",
+  "viewerGoal": "Create a tighter vertical product clip while preserving the demonstrated product behavior.",
+  "sourceCoordinateSystem": "source-milliseconds",
+  "uncertainties": [
+    "Speaker-aware crop has not been visually verified."
+  ],
+  "protectedBeats": [
+    "Product result",
+    "Original spoken claim"
+  ],
+  "operations": [
+    {
+      "id": "op-set-vertical",
+      "kind": "set-aspect",
+      "title": "Prepare a vertical canvas",
+      "detail": "Switch the output canvas to 9:16",
+      "rationale": "The requested destination is a vertical social feed.",
+      "confidence": "high",
+      "status": "proposed",
+      "ratio": "9:16"
+    },
+    {
+      "id": "op-title",
+      "kind": "add-text",
+      "title": "Add the opening promise",
+      "detail": "Show a centered title for the first 2.5 seconds",
+      "rationale": "Makes the clip understandable before audio is enabled.",
+      "confidence": "medium",
+      "status": "proposed",
+      "overlay": {
+        "kind": "title",
+        "text": "Edit the cut. Keep control.",
+        "startMs": 0,
+        "endMs": 2500,
+        "position": "center",
+        "fontSize": 82,
+        "color": "#ffffff",
+        "background": true
+      }
+    }
+  ]
+}

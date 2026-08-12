@@ -41,4 +41,9 @@ The initial vertical slice should prove one complete, local workflow:
 
 ## Deferred from the first slice
 
-Multi-user collaboration, hosted AI, BYO credential storage, cloud media, backend rendering, billing, publishing, platform OAuth, public API deployment, and production MCP authentication remain deferred. Their contracts may be modeled, but they should not block proving the local editing loop.
+Multi-user collaboration, cloud media, backend rendering, billing, publishing,
+platform OAuth, public API deployment, and production MCP authentication remain
+deferred. VideoStitch-funded AI, AI resale, and persistent BYO model keys remain
+product exclusions. A customer-authenticated managed Codex runner is an approved
+later beta mode, with per-customer credential custody, tenant-isolated execution,
+explicit revocation, and no VideoStitch charge for OpenAI usage.

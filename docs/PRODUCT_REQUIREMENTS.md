@@ -16,11 +16,11 @@ Madbot-derived video skills, a versioned edit-decision format, browser-side
 preview/rendering, and an optional paid backend rendering service.
 
 The default experience keeps source media and rendering in the user's browser.
-Creators may bring an OpenAI API key, use a ChatGPT or Codex plugin connected to
-their existing subscription, or install a public `SKILL.md` so another capable
-AI agent can control the editor. Interactive AI edits still render locally by
-default. Headless API jobs and projects that exceed browser capabilities use a
-quoted, paid backend render.
+Creators may use a ChatGPT or Codex plugin connected to their existing
+subscription, install a public `SKILL.md` for another capable AI agent, or run
+their own model API integration outside VideoStitch. Interactive AI edits still
+render locally by default. Headless API jobs and projects that exceed browser
+capabilities use a quoted, paid backend render.
 
 The product must remain useful without AI. AI is an editing assistant that
 produces inspectable edit operations; it is never the only way to use the
@@ -70,21 +70,30 @@ happens.
 
 ### Important OpenAI product boundary
 
-A ChatGPT subscription is not an OpenAI API credit balance. OpenAI documents
-ChatGPT and API billing as separate services. Therefore the web app must not
-claim that it can consume a user's ChatGPT subscription as if it were an API
-key, request ChatGPT cookies/session tokens, automate the ChatGPT website, or
-proxy subscription credentials.
+A ChatGPT subscription is not an OpenAI API credit balance. VideoStitch must not
+present subscription access as an API key, ask for a password or browser cookie,
+automate the ChatGPT website, or charge the customer for OpenAI usage.
 
-The supported "Connect ChatGPT" experience is a ChatGPT/Codex plugin using MCP:
-ChatGPT or Codex performs the reasoning under the user's own plan and calls
-Wiplash editing tools. Wiplash receives authenticated tool calls and project
-operations, not the user's ChatGPT credentials. OpenAI's plugin documentation
-supports MCP servers with optional UI in ChatGPT and Codex.
+VideoStitch supports two distinct ChatGPT/Codex connections. In external-client
+mode, ChatGPT or Codex performs reasoning under the user's plan and calls
+VideoStitch tools; VideoStitch receives project operations, not OpenAI
+credentials. In managed-runner mode, the user explicitly authorizes an isolated
+Codex CLI environment on VideoStitch infrastructure through Codex's official
+browser or device-code login. VideoStitch then acts as custodian of that
+customer's revocable Codex credential cache and may use it only for that
+customer's projects. It does not pool accounts or use one customer's identity
+for another customer's work.
+
+OpenAI documents browser login for `codex login`, device-code login for remote
+or headless environments, token refresh during active sessions, and credential
+storage under an independently configurable `CODEX_HOME`. Device-code login is
+currently beta, so managed-runner availability must remain feature-flagged and
+follow current OpenAI product terms and authentication behavior.
 
 References:
 
 - [OpenAI: ChatGPT subscriptions and API billing are separate](https://help.openai.com/en/articles/8156019-is-api-usage-included-in-chatgpt-subscriptions-even-if-i-have-a-paid-chatgpt-account)
+- [OpenAI: Codex authentication](https://developers.openai.com/codex/auth)
 - [OpenAI: MCP server and UI plugin quickstart](https://developers.openai.com/plugins/build/app-quickstart)
 
 ### Why now
@@ -118,7 +127,7 @@ rendering.
 | --- | --- | --- |
 | Creators will accept AI decisions when each cut is inspectable and reversible. | The current Madbot workflow works best when models select timestamps and deterministic systems render and QA them. | Testers consistently bypass the AI proposal review or cannot understand the edit diff. |
 | Browser rendering can serve a meaningful free tier. | Screenshot Studio already exports video in-browser and uses FFmpeg/WASM and WebCodecs. | Representative 1080p projects fail or exceed acceptable time/memory limits on most supported devices. |
-| Users value bringing an existing AI relationship. | The workflow already works through Codex skills and structured editing briefs. | Most testers prefer one bundled AI and will not connect an agent, plugin, or API key. |
+| Users value bringing an existing AI relationship. | The workflow already works through Codex skills and structured editing briefs. | Most testers prefer one bundled AI and will not connect an agent, plugin, or external model integration. |
 | Paid backend rendering can fund storage and compute. | Rendering has an observable input size, duration, resolution, and estimated compute cost. | Quotes are routinely higher than users' willingness to pay or margins remain negative after retries and storage. |
 | Existing Wiplash videos can prove the product's value. | Wiplash owns recent extension ads and podcast edits with before/after artifacts. | The assets lack documented rights, privacy clearance, or reproducible project manifests. |
 
@@ -207,11 +216,11 @@ media leaves the device.
 | Product marketer | Produce polished ad variants | Rebuilding crops, captions, zooms, and branding for every format | Reusable Screenshot Studio templates and AI-assisted edit plans with preview-before-render |
 | Agent-first user | Let an existing AI edit video | Editors expose no safe automation contract | Public skill, MCP tools, and a versioned manifest with validation and idempotency |
 | Privacy-conscious user | Edit without uploading source media | Cloud editors require media transfer | Local import, local preview, local rendering, and explicit paid-upload consent |
-| Cost-conscious user | Avoid paying twice for AI and rendering | Bundled services obscure compute and render costs | Bring an agent or API key, render in the browser, and see a quote before backend work |
+| Cost-conscious user | Avoid paying twice for AI and rendering | Bundled services obscure compute and render costs | Bring an agent or model integration, render in the browser, and see a quote before backend work |
 
 ### Differentiation value curve
 
-| Capability | Traditional browser editor | Automatic AI clipper | Headless render API | Wiplash Video Studio target |
+| Capability | Traditional browser editor | Automatic AI clipper | Headless render API | VideoStitch target |
 | --- | ---: | ---: | ---: | ---: |
 | Useful without AI | High | Low | Low | High |
 | Local source-media path | Medium | Low | None | High |
@@ -271,19 +280,35 @@ the project.
 - An interactive browser session renders locally by default. A headless call
   may create a quoted backend-render job that waits for explicit approval.
 
-#### Bring-your-own OpenAI API key mode
+#### Managed customer-authenticated Codex mode
 
-- The user supplies an OpenAI API key for in-editor assistance.
-- ChatGPT subscription allowances do not apply; API usage is billed by OpenAI
-  to the key owner.
-- MVP keys are session-only and must not be written to IndexedDB, localStorage,
+- The user starts an official Codex browser-login redirect or device-code flow;
+  VideoStitch never asks for an OpenAI password, browser cookie, or pasted
+  `auth.json` file.
+- A dedicated worker runs Codex CLI with a tenant-specific `CODEX_HOME`. The
+  credential cache is encrypted with a tenant-specific key, excluded from logs,
+  inaccessible to application support by default, and never mounted into
+  another tenant's job.
+- The worker may read only media and project state covered by a short-lived,
+  signed grant for that same customer and project. It receives no generic shell
+  or cross-tenant storage access.
+- OpenAI usage applies to the customer's selected ChatGPT/Codex account and
+  workspace. VideoStitch does not pool allowances, resell tokens, or add an AI
+  usage charge.
+- The user can inspect connection status, disconnect the account, and request
+  deletion of the cached credentials. Revocation prevents new jobs immediately.
+- This is an opt-in beta convenience path. External-client and self-operated
+  agent modes remain preferred because they avoid credential custody.
+
+#### Bring-your-own model API mode
+
+- The developer runs model inference in their own backend or a trusted local
+  companion using credentials from their chosen provider.
+- The provider bills the key owner directly. VideoStitch receives the resulting
+  structured edit plan, never the provider credential.
+- Provider keys must not enter VideoStitch HTTP requests, browser storage,
   project manifests, analytics, logs, crash reports, or support bundles.
-- The browser sends the key over TLS to an ephemeral Wiplash AI relay, or a
-  local companion performs the request. The product should prefer a local
-  companion when practical and must not call OpenAI directly from untrusted
-  client code if doing so exposes the key.
-- Saved encrypted credentials are out of scope until a dedicated secrets
-  design and security review are complete.
+- Direct browser calls that expose a secret provider key are unsupported.
 
 #### External-agent mode
 
@@ -295,13 +320,13 @@ the project.
 - Local browser rendering is available while the project is open. Unattended
   or headless jobs use the paid backend renderer.
 
-#### Wiplash-hosted AI mode (post-MVP)
+#### No VideoStitch-funded AI or AI resale
 
-- Wiplash supplies model inference using a disclosed model/provider class.
-- The user sees an estimate and maximum authorized amount before inference and
-  rendering.
-- AI and render charges are itemized. Failed deterministic validation is not
-  billable; retry/refund policy is explicit.
+- VideoStitch does not buy, pool, resell, or mark up model inference.
+- Users bring a subscribed agent, authorize their own isolated managed Codex
+  runner, run their own model API integration, or edit manually.
+- VideoStitch charges only for approved cloud media operations such as rendering,
+  QA, storage, transfer, and separately disclosed orchestration—not OpenAI use.
 
 ### 7.3 Editorial modes
 
@@ -335,8 +360,8 @@ visual context rather than the default for every project.
 #### Flow B: AI-assisted browser edit
 
 1. Import media and choose an editorial mode.
-2. Connect ChatGPT/Codex, attach a session-only API key, or invoke an external
-   agent.
+2. Connect ChatGPT/Codex, invoke an external agent, or import a plan produced by
+   the developer's own model integration.
 3. Grant the agent project-scoped permissions: read metadata/transcript,
    propose operations, request previews, or request quotes. Rendering and
    publishing are not included by default.
@@ -459,9 +484,13 @@ extend the operation schema rather than bypass it with arbitrary FFmpeg text.
   charge, render a paid job, upload, publish, schedule, delete source media, or
   change project privacy without a fresh user action.
 - **FR-027:** Agent and model provenance is recorded without retaining hidden
-  reasoning or credentials.
+  reasoning. Managed Codex credentials are retained only in the dedicated
+  secrets boundary and referenced by opaque connection ID elsewhere.
 - **FR-028:** Model failure, quota exhaustion, disconnection, or unsupported
   output returns the project to a usable manual state.
+- **FR-029:** Managed Codex jobs enforce customer, project, credential, media,
+  workspace, and output ownership at both queue admission and worker startup.
+  Any mismatch fails closed before Codex starts.
 
 #### Rendering
 
@@ -517,10 +546,10 @@ extend the operation schema rather than bypass it with arbitrary FFmpeg text.
 - **FR-050:** Browser editing and compatible local rendering can be used
   without purchasing render credits.
 - **FR-051:** BYO model/API charges are paid directly by the user to their
-  provider; Wiplash does not mark them up unless a separately disclosed relay
-  fee is introduced.
-- **FR-052:** Paid quotes separate inference, rendering, storage, transfer, and
-  optional add-ons when those costs apply.
+  provider. Managed Codex uses the customer's own subscription identity;
+  VideoStitch never marks up AI use.
+- **FR-052:** Paid quotes separate rendering, storage, transfer, and optional
+  deterministic media-processing add-ons when those costs apply.
 - **FR-053:** A quote identifies the exact project revision and output settings
   and cannot be reused after either changes.
 - **FR-054:** The user sets a maximum authorized amount. Overages require a new
@@ -586,7 +615,8 @@ User media
    |                                  +--> Versioned edit plan <--- AI adapter
    |                                                                |
    |                         ChatGPT/Codex plugin -------------------+
-   |                         BYO OpenAI API key relay ---------------+
+   |                         Managed per-customer Codex sandbox -----+
+   |                         Developer-owned model integration -----+
    |                         Public SKILL.md / external MCP ---------+
    |
    +-- explicit consent --> Object storage --> Render queue
@@ -600,6 +630,12 @@ Interactive AI should operate on transcripts, metadata, audio features,
 low-resolution proxies, and sampled frames whenever those are sufficient. The
 system must not upload full-resolution source media merely because an AI mode
 was enabled.
+
+Each managed sandbox contains exactly one Codex session and is bound to one
+customer connection plus an explicit project grant. A session can resume only
+inside that ownership boundary. Sandboxes are not pooled across customers or
+silently repurposed across projects, and deterministic render jobs execute in a
+separate worker pool.
 
 ### 7.9 Security, privacy, and data requirements
 
@@ -615,6 +651,10 @@ was enabled.
   Tombstones preserve only the minimum billing/security audit data required.
 - API keys, OAuth tokens, media URLs, signed URLs, private transcript text, and
   detected secrets are redacted from logs and telemetry.
+- Managed Codex credentials live outside the application database in an
+  encrypted secrets store. Decryption is limited to the assigned tenant worker,
+  raw values never enter analytics or support tooling, and every use is audited
+  without recording token material.
 - Support bundles require user review before export and exclude source media and
   credentials by default.
 - Tool permissions distinguish read, propose, apply, preview, quote, spend,
@@ -660,30 +700,33 @@ was enabled.
 7. An agent reorders podcast dialogue and changes causality or speaker intent.
 8. A redaction covers the preview but not the final output due to a coordinate
    mismatch.
-9. The user's API key is revoked, exhausted, or rate-limited halfway through an
-   analysis.
+9. The user's external model integration is revoked, exhausted, or rate-limited
+   halfway through an analysis.
 10. The ChatGPT/Codex plugin loses authorization while an edit plan is pending.
-11. A backend quote expires after upload but before authorization.
-12. The render worker dies after a charge authorization but before completion.
-13. An idempotent retry arrives after the first job succeeded.
-14. A source URL changes content after a quote; content hashes must invalidate
+11. A managed Codex token is revoked or refreshed while a job is running.
+12. A tenant, project, or credential mismatch is detected at worker startup.
+13. A backend quote expires after upload but before authorization.
+14. The render worker dies after a charge authorization but before completion.
+15. An idempotent retry arrives after the first job succeeded.
+16. A source URL changes content after a quote; content hashes must invalidate
     the job.
-15. Audio exists on multiple tracks with different sample rates or channel
+17. Audio exists on multiple tracks with different sample rates or channel
     layouts.
-16. A browser preview differs from backend output because font, codec, or
+18. A browser preview differs from backend output because font, codec, or
     renderer versions differ.
-17. Private information appears only in a brief final-render frame, not sampled
+19. Private information appears only in a brief final-render frame, not sampled
     previews.
-18. The user requests deletion while a paid render or upload is active.
-19. A plugin tries to approve a charge using a general-purpose access token.
-20. A social platform rejects, delays, or privately restricts a later upload;
+20. The user requests deletion while a paid render or upload is active.
+21. A plugin tries to approve a charge using a general-purpose access token.
+22. A social platform rejects, delays, or privately restricts a later upload;
     rendering success must remain separate from publishing success.
 
 ### 7.12 Out of scope for MVP
 
-- Treating a ChatGPT subscription as API credits or accepting ChatGPT session
-  tokens.
-- Wiplash-hosted model inference billed to Wiplash.
+- Treating a ChatGPT subscription as API credits, collecting passwords/browser
+  cookies, pooling customer accounts, or using one customer's Codex identity for
+  another customer's work.
+- VideoStitch-funded model inference or AI-token resale.
 - Automatic publishing or scheduling to social platforms.
 - TikTok Direct Post approval as a dependency for the editor's launch.
 - Literal support for every codec/container and unlimited project size.
@@ -729,7 +772,9 @@ constructed merely as an internal uploader to obtain platform API access.
 
 - Public `SKILL.md` and narrow MCP tools.
 - ChatGPT/Codex plugin connection using project-scoped authentication.
-- Session-only BYO OpenAI API key mode.
+- BYO model integration that keeps provider credentials outside VideoStitch.
+- Feature-flagged managed Codex beta using per-customer authentication,
+  isolated `CODEX_HOME` storage, explicit revocation, and tenant-bound jobs.
 - AI plan diff, selective approval, provenance, and manual fallback.
 - Closed beta with builder-creators.
 - Exit checkpoint: zero credential leaks, zero unauthorized high-impact
@@ -750,8 +795,6 @@ constructed merely as an internal uploader to obtain platform API access.
 - Publish the cleared podcast and Wiplash product-ad examples with sanitized
   operation summaries.
 - Submit the ChatGPT/Codex plugin when product and security requirements pass.
-- Add optional Wiplash-hosted AI only after pricing and abuse controls are
-  validated.
 - Evaluate YouTube and TikTok export integrations as separate gated projects;
   do not delay the editor for platform approval.
 
@@ -762,11 +805,11 @@ constructed merely as an internal uploader to obtain platform API access.
 - `multi_source_timeline`
 - `ai_plan_diff`
 - `chatgpt_codex_plugin`
-- `byok_openai_session`
+- `managed_customer_codex`
+- `external_model_plan_import`
 - `external_agent_api`
 - `backend_render_quotes`
 - `paid_render_authorization`
-- `hosted_ai`
 - `youtube_export`
 - `tiktok_export`
 
@@ -782,15 +825,14 @@ constructed merely as an internal uploader to obtain platform API access.
 - Roll back a schema/template version when existing projects cannot migrate
   losslessly; preserve the prior reader and renderer until affected projects
   are exported or migrated.
-- Do not launch Wiplash-hosted AI if measured inference plus render cost cannot
-  support a transparent price and positive gross margin.
 
 ### Review checkpoints
 
 1. Product review: confirm working name, MVP boundary, and primary activation
    metric.
-2. Architecture/security review: approve local/cloud boundary, BYO-key handling,
-   plugin OAuth scopes, and deletion design.
+2. Architecture/security review: approve local/cloud boundary, external-agent handling,
+   plugin OAuth scopes, managed Codex credential custody and tenant isolation,
+   and deletion design.
 3. Editorial review: validate podcast, clip, ad, caption, privacy, and QA modes
    against cleared examples.
 4. Cost review: approve browser compatibility tiers, render benchmarks, quote
@@ -810,8 +852,8 @@ constructed merely as an internal uploader to obtain platform API access.
 - Exact MVP browser/project-size limits after benchmarks.
 - Whether the first ChatGPT/Codex connection ships as one combined plugin or a
   plugin plus independently installable skill.
-- Whether BYO API keys remain session-only permanently or later support an
-  audited encrypted vault.
+- Whether managed customer-authenticated Codex is invited beta only or available
+  to every cloud account at launch.
 - Backend media-retention defaults and maximum paid retention.
 - Render pricing after measured Madbot/production-worker costs.
 - Which cleared Wiplash ads and podcast projects become the canonical public

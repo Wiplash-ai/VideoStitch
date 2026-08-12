@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://videostitch.dev/schemas/project.v1.schema.json",
+  "title": "VideoStitch Project Manifest v1",
+  "type": "object",
+  "required": ["schemaVersion", "id", "name", "editorialMode", "residency", "createdAt", "updatedAt", "canvas", "assets", "clips", "overlays", "revisions", "currentRevisionId", "editPlans", "approvals"],
+  "properties": {
+    "schemaVersion": { "const": "videostitch.project.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "editorialMode": { "enum": ["podcast", "advertisement", "product-demo", "custom"] },
+    "residency": { "const": "local" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "canvas": { "type": "object", "required": ["ratio", "width", "height"], "properties": { "ratio": { "enum": ["16:9", "9:16", "1:1"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 } } },
+    "assets": { "type": "array", "items": { "type": "object", "required": ["id", "name", "mimeType", "size", "durationMs", "width", "height", "sha256", "importedAt"] } },
+    "clips": { "type": "array", "items": { "type": "object", "required": ["id", "assetId", "name", "sourceInMs", "sourceOutMs", "color", "volume", "muted", "fadeInMs", "fadeOutMs", "visualFadeInMs", "visualFadeOutMs"] } },
+    "overlays": { "type": "array" },
+    "revisions": { "type": "array", "minItems": 1 },
+    "currentRevisionId": { "type": "string", "minLength": 1 },
+    "editPlans": { "type": "array" },
+    "approvals": { "type": "array" }
+  }
+}

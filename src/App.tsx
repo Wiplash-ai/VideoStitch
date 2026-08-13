@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowRight,
   BrainCircuit,
+  BringToFront,
   Captions,
   Check,
   ChevronDown,
@@ -23,6 +24,7 @@ import {
   Plus,
   Redo2,
   Scissors,
+  Search,
   ShieldCheck,
   Sparkles,
   Type,
@@ -49,29 +51,36 @@ import {
 import {
   applyAiOperations,
   activeOverlays,
+  activeBrollClips,
+  brollDuration,
   clipAtTime,
   clipDuration,
   commitRevision,
   createEmptyProject,
   createFixturePlan,
+  defaultVisualTransform,
   dimensionsForRatio,
   formatTime,
   isProjectManifest,
   normalizeProject,
+  removeTimelineRange,
   timelineDuration,
+  type BrollClip,
   type ProjectManifest,
   type TimelineClip,
   type TextOverlay,
   type VideoAsset,
+  type VisualTransform,
 } from "./lib/model";
-import { parseCaptionFile } from "./lib/captions";
+import { parseCaptionFile, parseTranscriptFile } from "./lib/captions";
 import { operationSummary, validateEditPlan } from "./lib/editPlan";
 import { inspectLocalRender, renderProjectLocally, type RenderPreflight, type RenderProgress } from "./lib/render";
 import { HostedRunnerError, runHostedEditPlan, type HostedRunnerConfig, type HostedRunnerProgress } from "./lib/runnerClient";
 import { deleteProject, listProjects, loadAsset, loadLastProject, loadProject, probeVideo, saveAsset, saveProject, sha256 } from "./lib/storage";
 
 type SaveState = "loading" | "saved" | "saving" | "error";
-type InspectorTab = "plan" | "clip" | "text" | "history";
+type InspectorTab = "plan" | "clip" | "text" | "transcript" | "history";
+type MediaPlacement = "primary" | "broll";
 
 interface RenderDialogState {
   open: boolean;
@@ -120,6 +129,23 @@ function timelineEntries(clips: TimelineClip[]) {
   });
 }
 
+function previewTransformStyle(transform: VisualTransform) {
+  return {
+    objectFit: transform.fit,
+    objectPosition: `${50 + transform.positionX / 2}% ${50 + transform.positionY / 2}%`,
+    transform: `scale(${transform.scale})`,
+  } as const;
+}
+
+function brollOpacityAt(clip: BrollClip, timeMs: number) {
+  const elapsedMs = Math.max(0, timeMs - clip.timelineStartMs);
+  const remainingMs = Math.max(0, brollDuration(clip) - elapsedMs);
+  let opacity = clip.opacity;
+  if (clip.visualFadeInMs > 0) opacity *= Math.min(1, elapsedMs / clip.visualFadeInMs);
+  if (clip.visualFadeOutMs > 0) opacity *= Math.min(1, remainingMs / clip.visualFadeOutMs);
+  return Math.max(0, Math.min(1, opacity));
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1_048_576) return `${Math.max(1, Math.round(bytes / 1_024))} KB`;
   return `${(bytes / 1_048_576).toFixed(bytes > 10_485_760 ? 0 : 1)} MB`;
@@ -149,6 +175,7 @@ function App() {
   const [editor, setEditor] = useState<EditorHistory>({ snapshots: [], cursor: -1 });
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedBrollId, setSelectedBrollId] = useState<string | null>(null);
   const [selectedOperations, setSelectedOperations] = useState<Set<string>>(new Set());
   const [planErrors, setPlanErrors] = useState<string[]>([]);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
@@ -158,6 +185,7 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
+  const [transcriptQuery, setTranscriptQuery] = useState("");
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [projectLibrary, setProjectLibrary] = useState<ProjectManifest[]>([]);
   const [draggedClipId, setDraggedClipId] = useState<string | null>(null);
@@ -174,10 +202,13 @@ function App() {
   const [zoom, setZoom] = useState(1);
   const [notice, setNotice] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const brollVideoRef = useRef<HTMLVideoElement>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
+  const brollInputRef = useRef<HTMLInputElement>(null);
   const manifestInputRef = useRef<HTMLInputElement>(null);
   const planInputRef = useRef<HTMLInputElement>(null);
   const captionInputRef = useRef<HTMLInputElement>(null);
+  const transcriptInputRef = useRef<HTMLInputElement>(null);
   const relinkInputRef = useRef<HTMLInputElement>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
   const hostedAgentAbortRef = useRef<AbortController | null>(null);
@@ -188,10 +219,18 @@ function App() {
   const entries = useMemo(() => timelineEntries(project?.clips ?? []), [project?.clips]);
   const selectedClip = project?.clips.find((clip) => clip.id === selectedClipId) ?? project?.clips[0] ?? null;
   const selectedAsset = project?.assets.find((asset) => asset.id === selectedClip?.assetId) ?? null;
+  const selectedBroll = project?.brollClips.find((clip) => clip.id === selectedBrollId) ?? null;
+  const selectedBrollAsset = project?.assets.find((asset) => asset.id === selectedBroll?.assetId) ?? null;
   const sourceUrl = selectedClip ? assetUrls[selectedClip.assetId] : undefined;
   const currentPlan = project?.editPlans.at(-1) ?? null;
   const selectedOverlay = project?.overlays.find((overlay) => overlay.id === selectedOverlayId) ?? null;
   const visibleOverlays = project ? activeOverlays(project, playheadMs) : [];
+  const activeBroll = project ? activeBrollClips(project, playheadMs).at(-1) ?? null : null;
+  const activeBrollUrl = activeBroll ? assetUrls[activeBroll.assetId] : undefined;
+  const filteredTranscript = useMemo(() => {
+    const query = transcriptQuery.trim().toLowerCase();
+    return query ? project?.transcript.filter((cue) => cue.text.toLowerCase().includes(query)) ?? [] : project?.transcript ?? [];
+  }, [project?.transcript, transcriptQuery]);
   const assetStorageKey = project?.assets.map((asset) => asset.id).join("|") ?? "";
   const canUndo = editor.cursor > 0;
   const canRedo = editor.cursor >= 0 && editor.cursor < editor.snapshots.length - 1;
@@ -267,8 +306,18 @@ function App() {
     if (!project.clips.some((clip) => clip.id === selectedClipId)) {
       setSelectedClipId(project.clips[0]?.id ?? null);
     }
+    if (selectedBrollId && !project.brollClips.some((clip) => clip.id === selectedBrollId)) setSelectedBrollId(null);
     setPlayheadMs((time) => Math.min(time, timelineDuration(project.clips)));
-  }, [project, selectedClipId]);
+  }, [project, selectedClipId, selectedBrollId]);
+
+  useEffect(() => {
+    const video = brollVideoRef.current;
+    if (!video || !activeBroll) return;
+    const expectedSeconds = (activeBroll.sourceInMs + Math.max(0, playheadMs - activeBroll.timelineStartMs)) / 1_000;
+    if (Math.abs(video.currentTime - expectedSeconds) > .16) video.currentTime = expectedSeconds;
+    if (isPlaying) void video.play().catch(() => undefined);
+    else video.pause();
+  }, [activeBroll, activeBrollUrl, isPlaying, playheadMs]);
 
   const showNotice = useCallback((message: string) => {
     setNotice(message);
@@ -300,8 +349,12 @@ function App() {
   );
 
   const importVideo = useCallback(
-    async (file: File) => {
+    async (file: File, placement: MediaPlacement = "primary") => {
       if (!project) return;
+      if (placement === "broll" && !totalDuration) {
+        showNotice("Add a narrative clip before placing B-roll.");
+        return;
+      }
       if (!file.type.startsWith("video/")) {
         showNotice("Choose an MP4 or WebM video file.");
         return;
@@ -323,41 +376,97 @@ function App() {
           importedAt: new Date().toISOString(),
         };
         await saveAsset(assetId, file);
-        const next = commitRevision(project, `Imported ${file.name}`, (draft) => {
+        const next = commitRevision(project, placement === "broll" ? `Imported ${file.name} as B-roll` : `Imported ${file.name}`, (draft) => {
           draft.assets.push(asset);
-          draft.clips.push({
-            id: clipId,
-            assetId,
-            name: file.name.replace(/\.[^.]+$/, ""),
-            sourceInMs: 0,
-            sourceOutMs: durationMs,
-            color: clipColors[draft.clips.length % clipColors.length],
-            volume: 1,
-            muted: false,
-            fadeInMs: 0,
-            fadeOutMs: 0,
-            visualFadeInMs: 0,
-            visualFadeOutMs: 0,
-          });
-          if (draft.name === "Untitled stitch") draft.name = file.name.replace(/\.[^.]+$/, "");
+          if (placement === "primary") {
+            draft.clips.push({
+              id: clipId,
+              assetId,
+              name: file.name.replace(/\.[^.]+$/, ""),
+              sourceInMs: 0,
+              sourceOutMs: durationMs,
+              color: clipColors[draft.clips.length % clipColors.length],
+              volume: 1,
+              muted: false,
+              fadeInMs: 0,
+              fadeOutMs: 0,
+              visualFadeInMs: 0,
+              visualFadeOutMs: 0,
+              transform: defaultVisualTransform(),
+            });
+            if (draft.name === "Untitled stitch") draft.name = file.name.replace(/\.[^.]+$/, "");
+          } else {
+            const timelineStartMs = Math.min(playheadMs, Math.max(0, totalDuration - 300));
+            draft.brollClips.push({
+              id: clipId,
+              assetId,
+              name: file.name.replace(/\.[^.]+$/, ""),
+              timelineStartMs,
+              sourceInMs: 0,
+              sourceOutMs: Math.min(durationMs, totalDuration - timelineStartMs),
+              opacity: 1,
+              visualFadeInMs: 120,
+              visualFadeOutMs: 120,
+              transform: defaultVisualTransform("cover"),
+            });
+          }
         });
         pushSnapshot(next);
-        setSelectedClipId(clipId);
-        setPlayheadMs(timelineDuration(project.clips));
-        showNotice(`${file.name} is stored locally and ready to edit.`);
+        if (placement === "primary") {
+          setSelectedClipId(clipId);
+          setSelectedBrollId(null);
+          setPlayheadMs(timelineDuration(project.clips));
+        } else {
+          setSelectedBrollId(clipId);
+          setInspectorTab("clip");
+        }
+        showNotice(`${file.name} is stored locally and ready as ${placement === "broll" ? "B-roll" : "a narrative clip"}.`);
       } catch (error) {
         showNotice(error instanceof Error ? error.message : "Video import failed.");
       } finally {
         setIsImporting(false);
       }
     },
-    [project, pushSnapshot, showNotice],
+    [playheadMs, project, pushSnapshot, showNotice, totalDuration],
   );
 
   const onMediaInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) void importVideo(file);
     event.target.value = "";
+  };
+
+  const onBrollInput = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) void importVideo(file, "broll");
+    event.target.value = "";
+  };
+
+  const addAssetToBroll = (asset: VideoAsset) => {
+    if (!totalDuration) {
+      showNotice("Add a narrative clip before placing B-roll.");
+      return;
+    }
+    const id = crypto.randomUUID();
+    const timelineStartMs = Math.min(playheadMs, Math.max(0, totalDuration - 300));
+    const durationMs = Math.min(asset.durationMs, totalDuration - timelineStartMs, 5_000);
+    commit(`Added ${asset.name} to V2`, (draft) => {
+      draft.brollClips.push({
+        id,
+        assetId: asset.id,
+        name: asset.name.replace(/\.[^.]+$/, ""),
+        timelineStartMs,
+        sourceInMs: 0,
+        sourceOutMs: durationMs,
+        opacity: 1,
+        visualFadeInMs: 120,
+        visualFadeOutMs: 120,
+        transform: defaultVisualTransform("cover"),
+      });
+    });
+    setSelectedBrollId(id);
+    setInspectorTab("clip");
+    showNotice(`${asset.name} added to V2 at ${formatTime(timelineStartMs, true)}.`);
   };
 
   const onDrop = (event: DragEvent<HTMLElement>) => {
@@ -489,24 +598,26 @@ function App() {
   };
 
   const trimSelected = (edge: "start" | "end") => {
-    if (!selectedClip) return;
+    if (!selectedClip || !project) return;
     if (clipDuration(selectedClip) <= 1_000) {
       showNotice("A clip must remain at least half a second long.");
       return;
     }
-    commit(`Trimmed clip ${edge}`, (draft) => {
-      const clip = draft.clips.find((candidate) => candidate.id === selectedClip.id);
-      if (!clip) return;
-      if (edge === "start") clip.sourceInMs += 500;
-      else clip.sourceOutMs -= 500;
-    });
+    const entry = entries.find((candidate) => candidate.clip.id === selectedClip.id);
+    if (!entry) return;
+    pushSnapshot(removeTimelineRange(
+      project,
+      edge === "start" ? entry.startMs : entry.endMs - 500,
+      edge === "start" ? entry.startMs + 500 : entry.endMs,
+      `Trimmed clip ${edge}`,
+    ));
   };
 
   const deleteSelected = () => {
-    if (!selectedClip) return;
-    commit("Removed clip", (draft) => {
-      draft.clips = draft.clips.filter((clip) => clip.id !== selectedClip.id);
-    });
+    if (!selectedClip || !project) return;
+    const entry = entries.find((candidate) => candidate.clip.id === selectedClip.id);
+    if (!entry) return;
+    pushSnapshot(removeTimelineRange(project, entry.startMs, entry.endMs, "Removed clip"));
   };
 
   const generatePlan = () => {
@@ -564,6 +675,7 @@ function App() {
       imported.updatedAt = new Date().toISOString();
       setEditor({ snapshots: [imported], cursor: 0 });
       setSelectedClipId(imported.clips[0]?.id ?? null);
+      setSelectedBrollId(null);
       setPlayheadMs(0);
       showNotice("Manifest imported. Relink any source media that is unavailable on this device.");
     } catch (error) {
@@ -634,6 +746,7 @@ function App() {
     const next = createEmptyProject();
     setEditor({ snapshots: [next], cursor: 0 });
     setSelectedClipId(null);
+    setSelectedBrollId(null);
     setSelectedOverlayId(null);
     setPlayheadMs(0);
     setProjectMenuOpen(false);
@@ -648,6 +761,7 @@ function App() {
     }
     setEditor({ snapshots: [next], cursor: 0 });
     setSelectedClipId(next.clips[0]?.id ?? null);
+    setSelectedBrollId(null);
     setSelectedOverlayId(null);
     setPlayheadMs(0);
     setProjectMenuOpen(false);
@@ -715,6 +829,22 @@ function App() {
     showNotice(`${overlays.length} caption cues imported.`);
   };
 
+  const importTranscript = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const cues = parseTranscriptFile(await file.text(), totalDuration);
+    if (!cues.length) {
+      showNotice("No valid SRT or WebVTT transcript cues were found in that file.");
+      return;
+    }
+    commit(`Imported ${cues.length} transcript cues`, (draft) => {
+      draft.transcript = cues;
+    });
+    setInspectorTab("transcript");
+    showNotice(`${cues.length} transcript cues are ready for text-based editing.`);
+  };
+
   const moveClip = (clipId: string, direction: -1 | 1) => {
     const index = project.clips.findIndex((clip) => clip.id === clipId);
     const target = index + direction;
@@ -746,6 +876,31 @@ function App() {
     replaceSnapshot(next);
   };
 
+  const updateBrollDirect = (clipId: string, patch: Partial<BrollClip>) => {
+    const next = structuredClone(project);
+    const clip = next.brollClips.find((candidate) => candidate.id === clipId);
+    if (!clip) return;
+    Object.assign(clip, patch);
+    next.updatedAt = new Date().toISOString();
+    replaceSnapshot(next);
+  };
+
+  const removeBroll = (clipId: string) => {
+    commit("Removed B-roll clip", (draft) => {
+      draft.brollClips = draft.brollClips.filter((clip) => clip.id !== clipId);
+    });
+    setSelectedBrollId(null);
+  };
+
+  const cutTranscriptCue = (cueId: string) => {
+    const cue = project.transcript.find((candidate) => candidate.id === cueId);
+    if (!cue) return;
+    const next = removeTimelineRange(project, cue.startMs, cue.endMs, `Cut transcript cue: ${cue.text.slice(0, 48)}`);
+    pushSnapshot(next);
+    setPlayheadMs(cue.startMs);
+    showNotice(`Removed ${formatTime(cue.endMs - cue.startMs, true)} and rippled the timeline.`);
+  };
+
   const checkpointCurrentState = (summary: string) => {
     pushSnapshot(commitRevision(project, summary, () => undefined));
   };
@@ -753,17 +908,22 @@ function App() {
   const commitClipBoundary = (edge: "sourceInMs" | "sourceOutMs", seconds: number) => {
     if (!selectedClip || !selectedAsset || !Number.isFinite(seconds)) return;
     const value = Math.round(seconds * 1_000);
+    if (value === selectedClip[edge]) return;
     const valid = edge === "sourceInMs"
-      ? value >= 0 && value <= selectedClip.sourceOutMs - 500
-      : value >= selectedClip.sourceInMs + 500 && value <= selectedAsset.durationMs;
+      ? value >= selectedClip.sourceInMs && value <= selectedClip.sourceOutMs - 500
+      : value >= selectedClip.sourceInMs + 500 && value <= selectedClip.sourceOutMs;
     if (!valid) {
       showNotice("Trim points must preserve at least half a second and stay within the source.");
       return;
     }
-    commit(edge === "sourceInMs" ? "Adjusted clip in point" : "Adjusted clip out point", (draft) => {
-      const clip = draft.clips.find((candidate) => candidate.id === selectedClip.id);
-      if (clip) clip[edge] = value;
-    });
+    const entry = entries.find((candidate) => candidate.clip.id === selectedClip.id);
+    if (!entry) return;
+    pushSnapshot(removeTimelineRange(
+      project,
+      edge === "sourceInMs" ? entry.startMs : entry.endMs - (selectedClip.sourceOutMs - value),
+      edge === "sourceInMs" ? entry.startMs + value - selectedClip.sourceInMs : entry.endMs,
+      edge === "sourceInMs" ? "Adjusted clip in point" : "Adjusted clip out point",
+    ));
   };
 
   const addOverlay = (kind: TextOverlay["kind"]) => {
@@ -892,9 +1052,11 @@ function App() {
   return (
     <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={onDrop}>
       <input ref={mediaInputRef} className="visually-hidden" type="file" accept="video/mp4,video/webm,video/*" onChange={onMediaInput} />
+      <input ref={brollInputRef} className="visually-hidden" type="file" accept="video/mp4,video/webm,video/*" onChange={onBrollInput} />
       <input ref={manifestInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importManifest} />
       <input ref={planInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importEditPlan} />
       <input ref={captionInputRef} className="visually-hidden" type="file" accept=".srt,.vtt,text/plain,text/vtt" onChange={importCaptions} />
+      <input ref={transcriptInputRef} className="visually-hidden" type="file" accept=".srt,.vtt,text/plain,text/vtt" onChange={importTranscript} />
       <input ref={relinkInputRef} className="visually-hidden" type="file" accept="video/mp4,video/webm,video/*" onChange={relinkAsset} />
 
       <header className="topbar">
@@ -943,24 +1105,24 @@ function App() {
             <strong>{isImporting ? "Indexing video…" : "Import video"}</strong>
             <span>MP4 or WebM</span>
           </button>
+          <button className="rail-broll-button" onClick={() => brollInputRef.current?.click()} disabled={isImporting || !totalDuration}><BringToFront /> Import directly to V2</button>
           <div className="asset-list">
             {project.assets.map((asset) => (
-              <button
-                className={`asset-card ${selectedAsset?.id === asset.id ? "active" : ""} ${assetUrls[asset.id] ? "" : "missing"}`}
+              <article
+                className={`asset-card ${selectedAsset?.id === asset.id || selectedBrollAsset?.id === asset.id ? "active" : ""} ${assetUrls[asset.id] ? "" : "missing"}`}
                 key={asset.id}
-                onClick={() => {
+              >
+                <button className="asset-main" onClick={() => {
                   if (!assetUrls[asset.id]) {
                     setRelinkAssetId(asset.id);
                     window.setTimeout(() => relinkInputRef.current?.click());
                     return;
                   }
                   const clip = project.clips.find((candidate) => candidate.assetId === asset.id);
-                  if (clip) setSelectedClipId(clip.id);
-                }}
-              >
-                <span className="asset-thumb"><Film /><i>{asset.width}×{asset.height}</i></span>
-                <span className="asset-copy"><strong>{asset.name}</strong><small>{assetUrls[asset.id] ? `${formatTime(asset.durationMs)} · ${(asset.size / 1_048_576).toFixed(1)} MB` : "Source missing · click to relink"}</small></span>
-              </button>
+                  if (clip) { setSelectedClipId(clip.id); setSelectedBrollId(null); setInspectorTab("clip"); }
+                }}><span className="asset-thumb"><Film /><i>{asset.width}×{asset.height}</i></span><span className="asset-copy"><strong>{asset.name}</strong><small>{assetUrls[asset.id] ? `${formatTime(asset.durationMs)} · ${(asset.size / 1_048_576).toFixed(1)} MB` : "Source missing · click to relink"}</small></span></button>
+                <button className="asset-broll-action" disabled={!assetUrls[asset.id] || !totalDuration} onClick={() => addAssetToBroll(asset)} title="Place a five-second cutaway at the playhead"><BringToFront /> V2</button>
+              </article>
             ))}
           </div>
           <div className="local-boundary">
@@ -983,6 +1145,7 @@ function App() {
               <span className="toolbar-divider" />
               <button className="tool-button" disabled={!project.clips.length} onClick={() => addOverlay("caption")}><Captions /> Caption</button>
               <button className="tool-button" disabled={!project.clips.length} onClick={() => addOverlay("title")}><Type /> Title</button>
+              <button className="tool-button" disabled={!project.clips.length} onClick={() => brollInputRef.current?.click()}><BringToFront /> B-roll</button>
             </div>
             <div className="canvas-switcher">
               {(["16:9", "9:16", "1:1"] as const).map((ratio) => (
@@ -1001,6 +1164,7 @@ function App() {
                 <video
                   ref={videoRef}
                   src={sourceUrl}
+                  style={previewTransformStyle(selectedClip.transform)}
                   onTimeUpdate={onVideoTime}
                   onPause={() => { if (!playbackIntentRef.current) setIsPlaying(false); }}
                   onPlay={() => setIsPlaying(true)}
@@ -1019,6 +1183,20 @@ function App() {
                   }}
                   playsInline
                 />
+                {activeBroll && activeBrollUrl && <video
+                  key={activeBroll.id}
+                  ref={brollVideoRef}
+                  className="broll-preview"
+                  src={activeBrollUrl}
+                  muted
+                  playsInline
+                  style={{ ...previewTransformStyle(activeBroll.transform), opacity: brollOpacityAt(activeBroll, playheadMs) }}
+                  onLoadedMetadata={() => {
+                    if (!brollVideoRef.current) return;
+                    brollVideoRef.current.currentTime = (activeBroll.sourceInMs + Math.max(0, playheadMs - activeBroll.timelineStartMs)) / 1_000;
+                    if (isPlaying) void brollVideoRef.current.play().catch(() => undefined);
+                  }}
+                />}
                 <div className="preview-overlays" aria-live="off">
                   {visibleOverlays.map((overlay) => <button
                     key={overlay.id}
@@ -1069,6 +1247,7 @@ function App() {
                         event.stopPropagation();
                         const entry = entries.find((candidate) => candidate.clip.id === clip.id);
                         setSelectedClipId(clip.id);
+                        setSelectedBrollId(null);
                         setInspectorTab("clip");
                         if (entry) seekTo(entry.startMs);
                       }}
@@ -1084,6 +1263,15 @@ function App() {
                   ))}
                   {!entries.length && <button className="empty-track" onClick={() => mediaInputRef.current?.click()}><Plus /> Add media to begin</button>}
                   <div className="playhead" style={{ left: `${totalDuration ? (playheadMs / totalDuration) * 100 : 0}%` }}><i /></div>
+                </div></div>
+                <div className="track-row broll-row"><div className="track-label"><BringToFront /><span>V2</span></div><div className="broll-track" onClick={onTimelineClick}>
+                  {project.brollClips.map((clip) => <button
+                    key={clip.id}
+                    className={`broll-clip ${selectedBrollId === clip.id ? "selected" : ""}`}
+                    style={{ left: `${totalDuration ? (clip.timelineStartMs / totalDuration) * 100 : 0}%`, width: `${totalDuration ? (brollDuration(clip) / totalDuration) * 100 : 0}%` }}
+                    onClick={(event) => { event.stopPropagation(); setSelectedBrollId(clip.id); setInspectorTab("clip"); seekTo(clip.timelineStartMs); }}
+                  ><BringToFront /><span>{clip.name}</span></button>)}
+                  {!project.brollClips.length && <button className="broll-empty" onClick={(event) => { event.stopPropagation(); brollInputRef.current?.click(); }}><Plus /> Add cutaways above V1</button>}
                 </div></div>
                 <div className="track-row audio-row"><div className="track-label"><LayoutPanelTop /><span>A1</span></div><div className="audio-track" onClick={onTimelineClick}>{project.clips.length > 0 && <div className="waveform" aria-hidden="true">{Array.from({ length: 84 }, (_, index) => <i key={index} style={{ height: `${20 + ((index * 37) % 72)}%` }} />)}</div>}</div></div>
                 <div className="track-row text-row"><div className="track-label"><Captions /><span>TXT</span></div><div className="text-track" onClick={onTimelineClick}>
@@ -1104,6 +1292,7 @@ function App() {
             <button className={inspectorTab === "plan" ? "active" : ""} onClick={() => setInspectorTab("plan")}><Sparkles /> AI</button>
             <button className={inspectorTab === "clip" ? "active" : ""} onClick={() => setInspectorTab("clip")}><Film /> Clip</button>
             <button className={inspectorTab === "text" ? "active" : ""} onClick={() => setInspectorTab("text")}><Type /> Text</button>
+            <button className={inspectorTab === "transcript" ? "active" : ""} onClick={() => setInspectorTab("transcript")}><Captions /> Words</button>
             <button className={inspectorTab === "history" ? "active" : ""} onClick={() => setInspectorTab("history")}><History /> History</button>
           </div>
           {inspectorTab === "plan" ? (
@@ -1154,13 +1343,39 @@ function App() {
             </div>
           ) : inspectorTab === "clip" ? (
             <div className="property-pane">
-              {selectedClip && selectedAsset ? <>
+              {selectedBroll && selectedBrollAsset ? <>
+                <div className="property-heading"><span className="property-color blue" /><div><strong>{selectedBroll.name}</strong><small>V2 cutaway · {formatTime(brollDuration(selectedBroll), true)}</small></div></div>
+                <section className="property-section">
+                  <div className="property-label"><span>V2 timing</span><small>seconds</small></div>
+                  <div className="timing-grid">
+                    <label>Timeline start<input key={`${selectedBroll.id}-start-${selectedBroll.timelineStartMs}`} type="number" min="0" max={Math.max(0, totalDuration - brollDuration(selectedBroll)) / 1_000} step="0.01" defaultValue={(selectedBroll.timelineStartMs / 1_000).toFixed(2)} onBlur={(event) => commit("Moved B-roll clip", (draft) => { const clip = draft.brollClips.find((candidate) => candidate.id === selectedBroll.id); if (clip) clip.timelineStartMs = Math.max(0, Math.min(totalDuration - brollDuration(clip), event.currentTarget.valueAsNumber * 1_000)); })} /></label>
+                    <label>Duration<input value={(brollDuration(selectedBroll) / 1_000).toFixed(2)} readOnly /></label>
+                    <label>Source in<input key={`${selectedBroll.id}-in-${selectedBroll.sourceInMs}`} type="number" min="0" max={(selectedBroll.sourceOutMs - 300) / 1_000} step="0.01" defaultValue={(selectedBroll.sourceInMs / 1_000).toFixed(2)} onBlur={(event) => commit("Adjusted B-roll in point", (draft) => { const clip = draft.brollClips.find((candidate) => candidate.id === selectedBroll.id); const value = event.currentTarget.valueAsNumber * 1_000; if (clip && value >= 0 && value <= clip.sourceOutMs - 300) clip.sourceInMs = value; })} /></label>
+                    <label>Source out<input key={`${selectedBroll.id}-out-${selectedBroll.sourceOutMs}`} type="number" min={(selectedBroll.sourceInMs + 300) / 1_000} max={selectedBrollAsset.durationMs / 1_000} step="0.01" defaultValue={(selectedBroll.sourceOutMs / 1_000).toFixed(2)} onBlur={(event) => commit("Adjusted B-roll out point", (draft) => { const clip = draft.brollClips.find((candidate) => candidate.id === selectedBroll.id); const value = event.currentTarget.valueAsNumber * 1_000; if (clip && value >= clip.sourceInMs + 300 && value <= selectedBrollAsset.durationMs && clip.timelineStartMs + value - clip.sourceInMs <= totalDuration) clip.sourceOutMs = value; })} /></label>
+                  </div>
+                </section>
+                <section className="property-section">
+                  <div className="property-label"><span>Frame</span><small>{selectedBroll.transform.fit} · {selectedBroll.transform.scale.toFixed(2)}×</small></div>
+                  <div className="segmented-control two">{(["contain", "cover"] as const).map((fit) => <button key={fit} className={selectedBroll.transform.fit === fit ? "active" : ""} onClick={() => commit(`Set B-roll to ${fit}`, (draft) => { const clip = draft.brollClips.find((candidate) => candidate.id === selectedBroll.id); if (clip) clip.transform.fit = fit; })}>{fit}</button>)}</div>
+                  <label className="range-field"><span>Zoom <small>{selectedBroll.transform.scale.toFixed(2)}×</small></span><input type="range" min="1" max="3" step="0.01" value={selectedBroll.transform.scale} onChange={(event) => updateBrollDirect(selectedBroll.id, { transform: { ...selectedBroll.transform, scale: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed B-roll zoom")} /></label>
+                  <label className="range-field"><span>Horizontal <small>{Math.round(selectedBroll.transform.positionX)}%</small></span><input type="range" min="-100" max="100" step="1" value={selectedBroll.transform.positionX} onChange={(event) => updateBrollDirect(selectedBroll.id, { transform: { ...selectedBroll.transform, positionX: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed B-roll horizontally")} /></label>
+                  <label className="range-field"><span>Vertical <small>{Math.round(selectedBroll.transform.positionY)}%</small></span><input type="range" min="-100" max="100" step="1" value={selectedBroll.transform.positionY} onChange={(event) => updateBrollDirect(selectedBroll.id, { transform: { ...selectedBroll.transform, positionY: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed B-roll vertically")} /></label>
+                  <button className="auto-frame-button" onClick={() => commit("Auto-filled B-roll frame", (draft) => { const clip = draft.brollClips.find((candidate) => candidate.id === selectedBroll.id); if (clip) clip.transform = defaultVisualTransform("cover"); })}><Sparkles /> Auto fill center</button>
+                </section>
+                <section className="property-section">
+                  <div className="property-label"><span>Blend</span><small>{Math.round(selectedBroll.opacity * 100)}%</small></div>
+                  <label className="range-field"><span>Opacity <small>{Math.round(selectedBroll.opacity * 100)}%</small></span><input type="range" min="0" max="1" step="0.01" value={selectedBroll.opacity} onChange={(event) => updateBrollDirect(selectedBroll.id, { opacity: event.currentTarget.valueAsNumber })} onPointerUp={() => checkpointCurrentState("Adjusted B-roll opacity")} /></label>
+                  <div className="timing-grid"><label>Fade in<input type="number" min="0" max={brollDuration(selectedBroll) / 1_000} step="0.1" value={(selectedBroll.visualFadeInMs / 1_000).toFixed(1)} onChange={(event) => updateBrollDirect(selectedBroll.id, { visualFadeInMs: Math.max(0, event.currentTarget.valueAsNumber * 1_000) })} onBlur={() => checkpointCurrentState("Adjusted B-roll fade in")} /></label><label>Fade out<input type="number" min="0" max={brollDuration(selectedBroll) / 1_000} step="0.1" value={(selectedBroll.visualFadeOutMs / 1_000).toFixed(1)} onChange={(event) => updateBrollDirect(selectedBroll.id, { visualFadeOutMs: Math.max(0, event.currentTarget.valueAsNumber * 1_000) })} onBlur={() => checkpointCurrentState("Adjusted B-roll fade out")} /></label></div>
+                </section>
+                <section className="source-proof"><ShieldCheck /><div><strong>Muted cutaway source</strong><span>{selectedBrollAsset.sha256.slice(0, 12)}… · source audio never replaces A1</span></div></section>
+                <button className="destructive-action" onClick={() => removeBroll(selectedBroll.id)}><Trash2 /> Remove clip from V2</button>
+              </> : selectedClip && selectedAsset ? <>
                 <div className="property-heading"><span className={`property-color ${selectedClip.color}`} /><div><strong>{selectedClip.name}</strong><small>{selectedAsset.name} · {formatTime(clipDuration(selectedClip), true)}</small></div></div>
                 <section className="property-section">
                   <div className="property-label"><span>Source timing</span><small>seconds</small></div>
                   <div className="timing-grid">
-                    <label>In<input key={`${selectedClip.id}-in-${selectedClip.sourceInMs}`} type="number" min="0" max={selectedClip.sourceOutMs / 1_000 - .5} step="0.01" defaultValue={(selectedClip.sourceInMs / 1_000).toFixed(2)} onBlur={(event) => commitClipBoundary("sourceInMs", event.currentTarget.valueAsNumber)} /></label>
-                    <label>Out<input key={`${selectedClip.id}-out-${selectedClip.sourceOutMs}`} type="number" min={selectedClip.sourceInMs / 1_000 + .5} max={selectedAsset.durationMs / 1_000} step="0.01" defaultValue={(selectedClip.sourceOutMs / 1_000).toFixed(2)} onBlur={(event) => commitClipBoundary("sourceOutMs", event.currentTarget.valueAsNumber)} /></label>
+                    <label>In<input key={`${selectedClip.id}-in-${selectedClip.sourceInMs}`} type="number" min={selectedClip.sourceInMs / 1_000} max={selectedClip.sourceOutMs / 1_000 - .5} step="0.01" defaultValue={(selectedClip.sourceInMs / 1_000).toFixed(2)} onBlur={(event) => commitClipBoundary("sourceInMs", event.currentTarget.valueAsNumber)} /></label>
+                    <label>Out<input key={`${selectedClip.id}-out-${selectedClip.sourceOutMs}`} type="number" min={selectedClip.sourceInMs / 1_000 + .5} max={selectedClip.sourceOutMs / 1_000} step="0.01" defaultValue={(selectedClip.sourceOutMs / 1_000).toFixed(2)} onBlur={(event) => commitClipBoundary("sourceOutMs", event.currentTarget.valueAsNumber)} /></label>
                   </div>
                   <div className="nudge-row"><button onClick={() => trimSelected("start")}>Nudge in +0.5s</button><button onClick={() => trimSelected("end")}>Nudge out −0.5s</button></div>
                 </section>
@@ -1175,6 +1390,14 @@ function App() {
                 <section className="property-section">
                   <div className="property-label"><span>Sequence</span><small>Drag on timeline</small></div>
                   <div className="sequence-actions"><button disabled={project.clips[0]?.id === selectedClip.id} onClick={() => moveClip(selectedClip.id, -1)}><ArrowLeft /> Earlier</button><button disabled={project.clips.at(-1)?.id === selectedClip.id} onClick={() => moveClip(selectedClip.id, 1)}>Later <ArrowRight /></button></div>
+                </section>
+                <section className="property-section">
+                  <div className="property-label"><span>Frame</span><small>{selectedClip.transform.fit} · {selectedClip.transform.scale.toFixed(2)}×</small></div>
+                  <div className="segmented-control two">{(["contain", "cover"] as const).map((fit) => <button key={fit} className={selectedClip.transform.fit === fit ? "active" : ""} onClick={() => commit(`Set clip to ${fit}`, (draft) => { const clip = draft.clips.find((candidate) => candidate.id === selectedClip.id); if (clip) clip.transform.fit = fit; })}>{fit}</button>)}</div>
+                  <label className="range-field"><span>Zoom <small>{selectedClip.transform.scale.toFixed(2)}×</small></span><input type="range" min="1" max="3" step="0.01" value={selectedClip.transform.scale} onChange={(event) => updateClipDirect(selectedClip.id, { transform: { ...selectedClip.transform, scale: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed clip zoom")} /></label>
+                  <label className="range-field"><span>Horizontal <small>{Math.round(selectedClip.transform.positionX)}%</small></span><input type="range" min="-100" max="100" step="1" value={selectedClip.transform.positionX} onChange={(event) => updateClipDirect(selectedClip.id, { transform: { ...selectedClip.transform, positionX: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed clip horizontally")} /></label>
+                  <label className="range-field"><span>Vertical <small>{Math.round(selectedClip.transform.positionY)}%</small></span><input type="range" min="-100" max="100" step="1" value={selectedClip.transform.positionY} onChange={(event) => updateClipDirect(selectedClip.id, { transform: { ...selectedClip.transform, positionY: event.currentTarget.valueAsNumber } })} onPointerUp={() => checkpointCurrentState("Reframed clip vertically")} /></label>
+                  <button className="auto-frame-button" onClick={() => commit("Auto-filled clip frame", (draft) => { const clip = draft.clips.find((candidate) => candidate.id === selectedClip.id); if (clip) clip.transform = defaultVisualTransform("cover"); })}><Sparkles /> Auto fill center</button>
                 </section>
                 <section className="property-section">
                   <div className="property-label"><span>Visual fades</span><small>Dip through black</small></div>
@@ -1200,6 +1423,16 @@ function App() {
                 <div className="overlay-style-row"><label>Color<input type="color" value={selectedOverlay.color} onChange={(event) => updateOverlayDirect(selectedOverlay.id, { color: event.currentTarget.value })} onBlur={() => checkpointCurrentState(`Recolored ${selectedOverlay.kind}`)} /></label><label className="check-field"><input type="checkbox" checked={selectedOverlay.background} onChange={(event) => commit(`Changed ${selectedOverlay.kind} background`, (draft) => { const overlay = draft.overlays.find((candidate) => candidate.id === selectedOverlay.id); if (overlay) overlay.background = event.currentTarget.checked; })} /><span><Check /></span>Background</label></div>
                 <button className="destructive-action" onClick={() => removeOverlay(selectedOverlay.id)}><Trash2 /> Remove {selectedOverlay.kind}</button>
               </div> : <div className="inspector-empty compact"><Type /><strong>Add text to the cut</strong><p>Captions and titles are visible in preview and included in local exports.</p></div>}
+            </div>
+          ) : inspectorTab === "transcript" ? (
+            <div className="transcript-pane">
+              <div className="transcript-heading"><div><strong>Text-based edit</strong><small>{project.transcript.length ? `${project.transcript.length} timed cues` : "Import timed words"}</small></div><button onClick={() => transcriptInputRef.current?.click()}><Upload /> SRT/VTT</button></div>
+              {project.transcript.length > 0 && <label className="transcript-search"><Search /><input value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.currentTarget.value)} placeholder="Find a phrase…" /></label>}
+              {filteredTranscript.length > 0 ? <div className="transcript-list">{filteredTranscript.map((cue) => <article key={cue.id}>
+                <button className="transcript-seek" onClick={() => seekTo(cue.startMs)}><time>{formatTime(cue.startMs, true)}</time><span>{cue.text}</span></button>
+                <button className="transcript-cut" onClick={() => cutTranscriptCue(cue.id)} title="Remove this timed cue and ripple the timeline"><Scissors /> Cut</button>
+              </article>)}</div> : <div className="inspector-empty"><Captions /><strong>{project.transcript.length ? "No matching words" : "Edit the timeline from words"}</strong><p>{project.transcript.length ? "Try a different search phrase." : "Import an SRT or WebVTT transcript. Every cue can seek the playhead or create a reversible ripple cut."}</p>{!project.transcript.length && <button className="inline-primary" onClick={() => transcriptInputRef.current?.click()}><Upload /> Import transcript</button>}</div>}
+              {project.transcript.length > 0 && <div className="transcript-boundary"><ShieldCheck /><span>Cuts are non-destructive revisions. Source media and cue text remain inspectable in history.</span></div>}
             </div>
           ) : (
             <div className="history-pane">

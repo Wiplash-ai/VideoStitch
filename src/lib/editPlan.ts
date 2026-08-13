@@ -43,6 +43,17 @@ function validateOverlay(value: unknown, index: number, durationMs: number, erro
   if (typeof value.background !== "boolean") errors.push(`operations[${index}].overlay.background must be boolean.`);
 }
 
+function validateTransform(value: unknown, path: string, errors: string[]) {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`);
+    return;
+  }
+  if (!["contain", "cover"].includes(String(value.fit))) errors.push(`${path}.fit must be contain or cover.`);
+  if (typeof value.scale !== "number" || value.scale < 1 || value.scale > 3) errors.push(`${path}.scale must be between 1 and 3.`);
+  if (typeof value.positionX !== "number" || value.positionX < -100 || value.positionX > 100) errors.push(`${path}.positionX must be between -100 and 100.`);
+  if (typeof value.positionY !== "number" || value.positionY < -100 || value.positionY > 100) errors.push(`${path}.positionY must be between -100 and 100.`);
+}
+
 export function validateEditPlan(value: unknown, project: ProjectManifest): PlanValidationResult {
   const errors: string[] = [];
   if (!isRecord(value)) return { plan: null, errors: ["The edit plan must be a JSON object."] };
@@ -60,6 +71,8 @@ export function validateEditPlan(value: unknown, project: ProjectManifest): Plan
   }
 
   const clipIds = new Set(project.clips.map((clip) => clip.id));
+  const clipsById = new Map(project.clips.map((clip) => [clip.id, clip]));
+  const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]));
   const operationIds = new Set<string>();
   const durationMs = timelineDuration(project.clips);
   value.operations.forEach((rawOperation, index) => {
@@ -80,6 +93,8 @@ export function validateEditPlan(value: unknown, project: ProjectManifest): Plan
     } else if (kind === "trim-clip") {
       if (!clipIds.has(String(rawOperation.clipId))) errors.push(`operations[${index}].clipId is unknown.`);
       if (!isInteger(rawOperation.sourceInMs) || !isInteger(rawOperation.sourceOutMs) || Number(rawOperation.sourceOutMs) - Number(rawOperation.sourceInMs) < 500) errors.push(`operations[${index}] has invalid trim coordinates.`);
+      const clip = clipsById.get(String(rawOperation.clipId));
+      if (clip && (Number(rawOperation.sourceInMs) < clip.sourceInMs || Number(rawOperation.sourceOutMs) > clip.sourceOutMs)) errors.push(`operations[${index}] may trim inward only; use undo to restore removed source.`);
     } else if (kind === "split-clip") {
       if (!clipIds.has(String(rawOperation.clipId))) errors.push(`operations[${index}].clipId is unknown.`);
       if (!isInteger(rawOperation.sourceTimeMs)) errors.push(`operations[${index}].sourceTimeMs must be an integer.`);
@@ -91,6 +106,21 @@ export function validateEditPlan(value: unknown, project: ProjectManifest): Plan
       if (!clipIds.has(String(rawOperation.clipId))) errors.push(`operations[${index}].clipId is unknown.`);
       if (typeof rawOperation.volume !== "number" || rawOperation.volume < 0 || rawOperation.volume > 1) errors.push(`operations[${index}].volume must be between 0 and 1.`);
       if (typeof rawOperation.muted !== "boolean" || !isInteger(rawOperation.fadeInMs) || !isInteger(rawOperation.fadeOutMs)) errors.push(`operations[${index}] has invalid audio settings.`);
+    } else if (kind === "set-clip-transform") {
+      if (!clipIds.has(String(rawOperation.clipId))) errors.push(`operations[${index}].clipId is unknown.`);
+      validateTransform(rawOperation.transform, `operations[${index}].transform`, errors);
+    } else if (kind === "add-broll") {
+      if (!isRecord(rawOperation.clip)) {
+        errors.push(`operations[${index}].clip must be an object.`);
+      } else {
+        const clip = rawOperation.clip;
+        const asset = assetsById.get(String(clip.assetId));
+        if (!asset) errors.push(`operations[${index}].clip.assetId is unknown.`);
+        if (!isString(clip.name)) errors.push(`operations[${index}].clip.name is required.`);
+        if (!isInteger(clip.timelineStartMs) || !isInteger(clip.sourceInMs) || !isInteger(clip.sourceOutMs) || Number(clip.timelineStartMs) < 0 || Number(clip.sourceInMs) < 0 || Number(clip.sourceOutMs) <= Number(clip.sourceInMs) || Number(clip.timelineStartMs) + Number(clip.sourceOutMs) - Number(clip.sourceInMs) > durationMs || (asset && Number(clip.sourceOutMs) > asset.durationMs)) errors.push(`operations[${index}].clip timing must stay within the source and timeline.`);
+        if (typeof clip.opacity !== "number" || clip.opacity < 0 || clip.opacity > 1 || !isInteger(clip.visualFadeInMs) || !isInteger(clip.visualFadeOutMs)) errors.push(`operations[${index}].clip blend settings are invalid.`);
+        validateTransform(clip.transform, `operations[${index}].clip.transform`, errors);
+      }
     } else if (kind === "add-text") {
       validateOverlay(rawOperation.overlay, index, durationMs, errors);
     } else {
@@ -108,6 +138,8 @@ export function operationSummary(operation: AiOperation) {
   if (operation.kind === "remove-clip") return `Remove ${operation.clipId}`;
   if (operation.kind === "reorder-clips") return `Reorder ${operation.clipIds.length} clips`;
   if (operation.kind === "set-clip-audio") return `${operation.muted ? "Mute" : `Set ${Math.round(operation.volume * 100)}% volume on`} ${operation.clipId}`;
+  if (operation.kind === "set-clip-transform") return `${operation.transform.fit} ${operation.clipId} at ${operation.transform.scale.toFixed(2)}×`;
+  if (operation.kind === "add-broll") return `Add ${operation.clip.name} to V2 at ${operation.clip.timelineStartMs}ms`;
   if (operation.kind === "add-text") return `Add ${operation.overlay.kind} at ${operation.overlay.startMs}-${operation.overlay.endMs}ms`;
   return operation.detail;
 }

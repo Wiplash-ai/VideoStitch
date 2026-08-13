@@ -1,5 +1,13 @@
 export type EditorialMode = "podcast" | "advertisement" | "product-demo" | "custom";
 export type AspectRatio = "16:9" | "9:16" | "1:1";
+export type VisualFit = "contain" | "cover";
+
+export interface VisualTransform {
+  fit: VisualFit;
+  scale: number;
+  positionX: number;
+  positionY: number;
+}
 
 export interface VideoAsset {
   id: string;
@@ -26,6 +34,29 @@ export interface TimelineClip {
   fadeOutMs: number;
   visualFadeInMs: number;
   visualFadeOutMs: number;
+  transform: VisualTransform;
+}
+
+export interface BrollClip {
+  id: string;
+  assetId: string;
+  name: string;
+  timelineStartMs: number;
+  sourceInMs: number;
+  sourceOutMs: number;
+  opacity: number;
+  visualFadeInMs: number;
+  visualFadeOutMs: number;
+  transform: VisualTransform;
+}
+
+export interface TranscriptCue {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  speaker?: string;
+  source: "imported";
 }
 
 export interface TextOverlay {
@@ -63,6 +94,8 @@ export type AiOperation =
   | ({ kind: "remove-clip"; clipId: string } & AiOperationBase)
   | ({ kind: "reorder-clips"; clipIds: string[] } & AiOperationBase)
   | ({ kind: "set-clip-audio"; clipId: string; volume: number; muted: boolean; fadeInMs: number; fadeOutMs: number } & AiOperationBase)
+  | ({ kind: "set-clip-transform"; clipId: string; transform: VisualTransform } & AiOperationBase)
+  | ({ kind: "add-broll"; clip: Omit<BrollClip, "id"> } & AiOperationBase)
   | ({ kind: "add-text"; overlay: Omit<TextOverlay, "id"> } & AiOperationBase);
 
 export interface EditPlan {
@@ -115,6 +148,8 @@ export interface ProjectManifest {
   };
   assets: VideoAsset[];
   clips: TimelineClip[];
+  brollClips: BrollClip[];
+  transcript: TranscriptCue[];
   overlays: TextOverlay[];
   revisions: Revision[];
   currentRevisionId: string;
@@ -139,6 +174,8 @@ export function createEmptyProject(): ProjectManifest {
     canvas: { ratio: "16:9", width: 1920, height: 1080 },
     assets: [],
     clips: [],
+    brollClips: [],
+    transcript: [],
     overlays: [],
     revisions: [
       {
@@ -165,10 +202,35 @@ export function normalizeProject(project: ProjectManifest): ProjectManifest {
     fadeOutMs: clip.fadeOutMs ?? 0,
     visualFadeInMs: clip.visualFadeInMs ?? 0,
     visualFadeOutMs: clip.visualFadeOutMs ?? 0,
+    transform: normalizeVisualTransform(clip.transform),
   }));
+  normalized.brollClips = Array.isArray(normalized.brollClips)
+    ? normalized.brollClips.map((clip) => ({
+        ...clip,
+        timelineStartMs: Math.max(0, clip.timelineStartMs ?? 0),
+        opacity: typeof clip.opacity === "number" ? Math.min(1, Math.max(0, clip.opacity)) : 1,
+        visualFadeInMs: clip.visualFadeInMs ?? 0,
+        visualFadeOutMs: clip.visualFadeOutMs ?? 0,
+        transform: normalizeVisualTransform(clip.transform, "cover"),
+      }))
+    : [];
+  normalized.transcript = Array.isArray(normalized.transcript) ? normalized.transcript : [];
   normalized.overlays = Array.isArray(normalized.overlays) ? normalized.overlays : [];
   normalized.approvals = Array.isArray(normalized.approvals) ? normalized.approvals : [];
   return normalized;
+}
+
+export function defaultVisualTransform(fit: VisualFit = "contain"): VisualTransform {
+  return { fit, scale: 1, positionX: 0, positionY: 0 };
+}
+
+function normalizeVisualTransform(transform: VisualTransform | undefined, fit: VisualFit = "contain"): VisualTransform {
+  return {
+    fit: transform?.fit === "cover" || transform?.fit === "contain" ? transform.fit : fit,
+    scale: Math.min(3, Math.max(1, transform?.scale ?? 1)),
+    positionX: Math.min(100, Math.max(-100, transform?.positionX ?? 0)),
+    positionY: Math.min(100, Math.max(-100, transform?.positionY ?? 0)),
+  };
 }
 
 export function commitRevision(
@@ -196,12 +258,23 @@ export function clipDuration(clip: TimelineClip): number {
   return Math.max(0, clip.sourceOutMs - clip.sourceInMs);
 }
 
+export function brollDuration(clip: BrollClip): number {
+  return Math.max(0, clip.sourceOutMs - clip.sourceInMs);
+}
+
 export function timelineDuration(clips: TimelineClip[]): number {
   return clips.reduce((total, clip) => total + clipDuration(clip), 0);
 }
 
 export function activeOverlays(project: ProjectManifest, timeMs: number) {
   return project.overlays.filter((overlay) => timeMs >= overlay.startMs && timeMs <= overlay.endMs);
+}
+
+export function activeBrollClips(project: ProjectManifest, timeMs: number) {
+  return project.brollClips.filter((clip) => {
+    const endMs = clip.timelineStartMs + brollDuration(clip);
+    return timeMs >= clip.timelineStartMs && timeMs < endMs;
+  });
 }
 
 export function clipAtTime(clips: TimelineClip[], timeMs: number) {
@@ -223,6 +296,101 @@ export function dimensionsForRatio(ratio: AspectRatio) {
   if (ratio === "9:16") return { ratio, width: 1080, height: 1920 } as const;
   if (ratio === "1:1") return { ratio, width: 1080, height: 1080 } as const;
   return { ratio, width: 1920, height: 1080 } as const;
+}
+
+function spliceTimedInterval(startMs: number, endMs: number, cutStartMs: number, cutEndMs: number) {
+  const removedMs = cutEndMs - cutStartMs;
+  if (endMs <= cutStartMs) return { startMs, endMs };
+  if (startMs >= cutEndMs) return { startMs: startMs - removedMs, endMs: endMs - removedMs };
+  if (startMs >= cutStartMs && endMs <= cutEndMs) return null;
+  if (startMs < cutStartMs && endMs > cutEndMs) return { startMs, endMs: endMs - removedMs };
+  if (startMs < cutStartMs) return { startMs, endMs: cutStartMs };
+  return { startMs: cutStartMs, endMs: endMs - removedMs };
+}
+
+/** Removes a master-timeline range and ripples dependent V2, text, and transcript timing. */
+export function removeTimelineRange(project: ProjectManifest, startMs: number, endMs: number, summary?: string) {
+  const durationMs = timelineDuration(project.clips);
+  const cutStartMs = Math.max(0, Math.min(durationMs, Math.round(startMs)));
+  const cutEndMs = Math.max(cutStartMs, Math.min(durationMs, Math.round(endMs)));
+  if (cutEndMs <= cutStartMs) return project;
+
+  return commitRevision(project, summary ?? `Removed ${formatTime(cutEndMs - cutStartMs, true)} from transcript`, (draft) => {
+    mutateRemoveTimelineRange(draft, cutStartMs, cutEndMs);
+  });
+}
+
+/** Mutating form for composing several validated ripple cuts into one revision. */
+export function mutateRemoveTimelineRange(draft: ProjectManifest, startMs: number, endMs: number) {
+    const durationMs = timelineDuration(draft.clips);
+    const cutStartMs = Math.max(0, Math.min(durationMs, Math.round(startMs)));
+    const cutEndMs = Math.max(cutStartMs, Math.min(durationMs, Math.round(endMs)));
+    if (cutEndMs <= cutStartMs) return;
+    const nextClips: TimelineClip[] = [];
+    let cursorMs = 0;
+    for (const clip of draft.clips) {
+      const duration = clipDuration(clip);
+      const clipStartMs = cursorMs;
+      const clipEndMs = cursorMs + duration;
+      cursorMs = clipEndMs;
+      if (clipEndMs <= cutStartMs || clipStartMs >= cutEndMs) {
+        nextClips.push(clip);
+        continue;
+      }
+      const leftDurationMs = Math.max(0, cutStartMs - clipStartMs);
+      const rightDurationMs = Math.max(0, clipEndMs - cutEndMs);
+      if (leftDurationMs > 0) {
+        nextClips.push({ ...clip, sourceOutMs: clip.sourceInMs + leftDurationMs });
+      }
+      if (rightDurationMs > 0) {
+        nextClips.push({
+          ...clip,
+          id: leftDurationMs > 0 ? crypto.randomUUID() : clip.id,
+          name: leftDurationMs > 0 ? `${clip.name} · B` : clip.name,
+          sourceInMs: clip.sourceOutMs - rightDurationMs,
+        });
+      }
+    }
+    draft.clips = nextClips;
+
+    const nextBroll: BrollClip[] = [];
+    for (const clip of draft.brollClips) {
+      const clipStartMs = clip.timelineStartMs;
+      const clipEndMs = clipStartMs + brollDuration(clip);
+      if (clipEndMs <= cutStartMs) {
+        nextBroll.push(clip);
+      } else if (clipStartMs >= cutEndMs) {
+        nextBroll.push({ ...clip, timelineStartMs: clipStartMs - (cutEndMs - cutStartMs) });
+      } else if (clipStartMs < cutStartMs && clipEndMs > cutEndMs) {
+        const leftDurationMs = cutStartMs - clipStartMs;
+        nextBroll.push({ ...clip, sourceOutMs: clip.sourceInMs + leftDurationMs });
+        nextBroll.push({
+          ...clip,
+          id: crypto.randomUUID(),
+          name: `${clip.name} · B`,
+          timelineStartMs: cutStartMs,
+          sourceInMs: clip.sourceInMs + (cutEndMs - clipStartMs),
+        });
+      } else if (clipStartMs < cutStartMs) {
+        nextBroll.push({ ...clip, sourceOutMs: clip.sourceInMs + (cutStartMs - clipStartMs) });
+      } else if (clipEndMs > cutEndMs) {
+        nextBroll.push({
+          ...clip,
+          timelineStartMs: cutStartMs,
+          sourceInMs: clip.sourceInMs + (cutEndMs - clipStartMs),
+        });
+      }
+    }
+    draft.brollClips = nextBroll.filter((clip) => brollDuration(clip) > 0);
+
+    draft.overlays = draft.overlays.flatMap((overlay) => {
+      const timing = spliceTimedInterval(overlay.startMs, overlay.endMs, cutStartMs, cutEndMs);
+      return timing && timing.endMs > timing.startMs ? [{ ...overlay, ...timing }] : [];
+    });
+    draft.transcript = draft.transcript.flatMap((cue) => {
+      const timing = spliceTimedInterval(cue.startMs, cue.endMs, cutStartMs, cutEndMs);
+      return timing && timing.endMs > timing.startMs ? [{ ...cue, ...timing }] : [];
+    });
 }
 
 export function createFixturePlan(project: ProjectManifest): EditPlan | null {
@@ -293,23 +461,37 @@ export function applyAiOperations(project: ProjectManifest, operationIds: string
         if (operation.kind === "trim-start") {
           const first = draft.clips[0];
           if (first && clipDuration(first) > operation.amountMs + 500) {
-            first.sourceInMs += operation.amountMs;
+            mutateRemoveTimelineRange(draft, 0, operation.amountMs);
           }
         } else if (operation.kind === "trim-end") {
           const last = draft.clips.at(-1);
           if (last && clipDuration(last) > operation.amountMs + 500) {
-            last.sourceOutMs -= operation.amountMs;
+            const total = timelineDuration(draft.clips);
+            mutateRemoveTimelineRange(draft, total - operation.amountMs, total);
           }
         } else if (operation.kind === "set-aspect") {
           draft.canvas = dimensionsForRatio(operation.ratio);
         } else if (operation.kind === "trim-clip") {
           const clip = draft.clips.find((candidate) => candidate.id === operation.clipId);
           const asset = clip ? draft.assets.find((candidate) => candidate.id === clip.assetId) : null;
-          if (!clip || !asset || operation.sourceInMs < 0 || operation.sourceOutMs > asset.durationMs || operation.sourceOutMs - operation.sourceInMs < 500) {
+          if (!clip || !asset || operation.sourceInMs < clip.sourceInMs || operation.sourceOutMs > clip.sourceOutMs || operation.sourceOutMs - operation.sourceInMs < 500) {
             throw new Error(`Invalid trim operation for clip ${operation.clipId}.`);
           }
-          clip.sourceInMs = operation.sourceInMs;
-          clip.sourceOutMs = operation.sourceOutMs;
+          let timelineStartMs = 0;
+          for (const candidate of draft.clips) {
+            if (candidate.id === clip.id) break;
+            timelineStartMs += clipDuration(candidate);
+          }
+          if (operation.sourceOutMs < clip.sourceOutMs) {
+            mutateRemoveTimelineRange(
+              draft,
+              timelineStartMs + operation.sourceOutMs - clip.sourceInMs,
+              timelineStartMs + clipDuration(clip),
+            );
+          }
+          if (operation.sourceInMs > clip.sourceInMs) {
+            mutateRemoveTimelineRange(draft, timelineStartMs, timelineStartMs + operation.sourceInMs - clip.sourceInMs);
+          }
         } else if (operation.kind === "split-clip") {
           const index = draft.clips.findIndex((candidate) => candidate.id === operation.clipId);
           const clip = draft.clips[index];
@@ -320,8 +502,14 @@ export function applyAiOperations(project: ProjectManifest, operationIds: string
           clip.sourceOutMs = operation.sourceTimeMs;
           draft.clips.splice(index + 1, 0, right);
         } else if (operation.kind === "remove-clip") {
-          if (!draft.clips.some((candidate) => candidate.id === operation.clipId)) throw new Error(`Unknown clip ${operation.clipId}.`);
-          draft.clips = draft.clips.filter((candidate) => candidate.id !== operation.clipId);
+          let timelineStartMs = 0;
+          const clip = draft.clips.find((candidate) => {
+            if (candidate.id === operation.clipId) return true;
+            timelineStartMs += clipDuration(candidate);
+            return false;
+          });
+          if (!clip) throw new Error(`Unknown clip ${operation.clipId}.`);
+          mutateRemoveTimelineRange(draft, timelineStartMs, timelineStartMs + clipDuration(clip));
         } else if (operation.kind === "reorder-clips") {
           const currentIds = new Set(draft.clips.map((clip) => clip.id));
           if (operation.clipIds.length !== draft.clips.length || operation.clipIds.some((id) => !currentIds.has(id)) || new Set(operation.clipIds).size !== operation.clipIds.length) {
@@ -336,6 +524,22 @@ export function applyAiOperations(project: ProjectManifest, operationIds: string
           clip.muted = operation.muted;
           clip.fadeInMs = Math.max(0, operation.fadeInMs);
           clip.fadeOutMs = Math.max(0, operation.fadeOutMs);
+        } else if (operation.kind === "set-clip-transform") {
+          const clip = draft.clips.find((candidate) => candidate.id === operation.clipId);
+          if (!clip) throw new Error(`Unknown clip ${operation.clipId}.`);
+          clip.transform = normalizeVisualTransform(operation.transform);
+        } else if (operation.kind === "add-broll") {
+          const asset = draft.assets.find((candidate) => candidate.id === operation.clip.assetId);
+          const endMs = operation.clip.timelineStartMs + operation.clip.sourceOutMs - operation.clip.sourceInMs;
+          if (!asset || operation.clip.sourceInMs < 0 || operation.clip.sourceOutMs > asset.durationMs || operation.clip.sourceOutMs <= operation.clip.sourceInMs || endMs > timelineDuration(draft.clips)) {
+            throw new Error(`Invalid B-roll operation for asset ${operation.clip.assetId}.`);
+          }
+          draft.brollClips.push({
+            ...operation.clip,
+            id: crypto.randomUUID(),
+            opacity: Math.min(1, Math.max(0, operation.clip.opacity)),
+            transform: normalizeVisualTransform(operation.clip.transform, "cover"),
+          });
         } else if (operation.kind === "add-text") {
           if (operation.overlay.endMs <= operation.overlay.startMs || operation.overlay.startMs < 0 || operation.overlay.endMs > timelineDuration(draft.clips)) {
             throw new Error("Text overlay timing must stay within the current timeline.");

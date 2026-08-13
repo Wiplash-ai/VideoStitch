@@ -1,4 +1,4 @@
-import type { TextOverlay } from "./model";
+import type { TextOverlay, TranscriptCue } from "./model";
 
 function timestampToMs(value: string) {
   const normalized = value.trim().replace(",", ".");
@@ -10,11 +10,17 @@ function timestampToMs(value: string) {
   return Math.round(seconds * 1_000);
 }
 
-export function parseCaptionFile(source: string, durationMs: number): TextOverlay[] {
+interface ParsedCue {
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+function parseTimedText(source: string, durationMs: number): ParsedCue[] {
   const normalized = source.replace(/^WEBVTT[^\n]*\n+/i, "").replace(/\r\n/g, "\n").trim();
   if (!normalized) return [];
   const blocks = normalized.split(/\n{2,}/);
-  const overlays: TextOverlay[] = [];
+  const cues: ParsedCue[] = [];
 
   for (const block of blocks) {
     const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -26,17 +32,31 @@ export function parseCaptionFile(source: string, durationMs: number): TextOverla
     const endMs = rawEnd ? timestampToMs(rawEnd) : null;
     const text = lines.slice(timingIndex + 1).join(" ").replace(/<[^>]+>/g, "").trim();
     if (startMs === null || endMs === null || !text || endMs <= startMs || startMs >= durationMs) continue;
-    overlays.push({
-      id: crypto.randomUUID(),
-      kind: "caption",
+    cues.push({
       text,
       startMs: Math.max(0, startMs),
       endMs: Math.min(durationMs, endMs),
-      position: "bottom",
-      fontSize: 56,
-      color: "#ffffff",
-      background: true,
     });
   }
-  return overlays;
+  return cues;
+}
+
+export function parseCaptionFile(source: string, durationMs: number): TextOverlay[] {
+  return parseTimedText(source, durationMs).map((cue) => ({
+    ...cue,
+    id: crypto.randomUUID(),
+    kind: "caption",
+    position: "bottom",
+    fontSize: 56,
+    color: "#ffffff",
+    background: true,
+  }));
+}
+
+export function parseTranscriptFile(source: string, durationMs: number): TranscriptCue[] {
+  return parseTimedText(source, durationMs).map((cue) => ({
+    ...cue,
+    id: crypto.randomUUID(),
+    source: "imported",
+  }));
 }

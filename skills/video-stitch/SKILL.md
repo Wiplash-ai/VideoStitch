@@ -29,7 +29,7 @@ operations as a new revision.
 
 1. Ask the user to export the current VideoStitch project manifest.
 2. Read `schemaVersion`, `currentRevisionId`, immutable asset metadata, clip IDs,
-   source spans, canvas, and existing overlays.
+   source spans, V2 cutaways, transcript cues, canvas, and existing overlays.
 3. Establish the viewer goal and editorial mode. List beats that must remain.
 4. Propose the smallest useful operation set. Every operation needs a title,
    visible detail, concise rationale, and calibrated confidence.
@@ -47,6 +47,10 @@ operations as a new revision.
 - `remove-clip`: remove a clip from the sequence without deleting its asset.
 - `reorder-clips`: provide every current clip ID exactly once in output order.
 - `set-clip-audio`: set volume from `0` to `1`, mute, and audio fade durations.
+- `set-clip-transform`: choose contain/cover, zoom from `1` to `3`, and X/Y
+  framing from `-100` to `100` for an existing V1 clip.
+- `add-broll`: place an existing immutable asset on V2 with source/timeline
+  timing, opacity, fades, and framing. V2 is visual-only and never replaces A1.
 - `add-text`: add a timed caption or title at top, center, or bottom.
 
 ## Quality checks
@@ -56,6 +60,10 @@ operations as a new revision.
   milliseconds after trimming; splits leave at least 300 milliseconds per side.
 - Text overlays stay inside the current timeline and use a six-digit hex color.
 - A reorder includes all current clip IDs exactly once.
+- B-roll timing must stay inside both its referenced asset and the master
+  timeline. Do not infer a useful cutaway from filenames alone.
+- Reframing is visual composition, not evidence of speaker tracking. Declare
+  uncertainty unless the relevant frames were actually inspected.
 - Each uncertainty that could change editorial meaning is explicit.
 - High confidence is reserved for directly evidenced edits.
 

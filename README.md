@@ -18,6 +18,10 @@ later phases.
 - Preview seamlessly across clips; seek, split, precisely trim, reorder, remove,
   mute, adjust volume, and add audio fades to immutable source spans.
 - Switch among landscape, vertical, and square canvas presets.
+- Place muted cutaways on a timed V2 B-roll lane and reframe V1/V2 with
+  contain/cover, zoom, and horizontal/vertical position controls.
+- Import SRT/WebVTT as an editable transcript, seek from words, and create
+  reversible ripple cuts that retime V1, V2, captions, and later cues.
 - Add timed titles/captions or import SRT/WebVTT caption files.
 - Undo/redo changes and inspect persisted revision history.
 - Generate a fixture AI plan, review each rationale, and selectively apply it
@@ -31,7 +35,8 @@ later phases.
   in memory and source video bytes stay local.
 - Export and import the versioned `videostitch.project.v1` manifest.
 - Export a local VP9/Opus WebM with progress and cancellation, browser playback
-  QA, duration repair, artifact fingerprinting, and explicit revision approval.
+  QA, V2 compositing, visual reframing, duration repair, artifact fingerprinting,
+  and explicit revision approval.
 - Create, duplicate, switch, delete, and recover multiple local projects; relink
   missing media only when its SHA-256 fingerprint matches.
 - Load the permission-light MV3 extension shell to open the local or deployed

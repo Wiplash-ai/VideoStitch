@@ -1,4 +1,4 @@
-import { activeOverlays, clipDuration, timelineDuration, type ProjectManifest, type TextOverlay, type TimelineClip } from "./model";
+import { activeBrollClips, activeOverlays, brollDuration, clipDuration, timelineDuration, type BrollClip, type ProjectManifest, type TextOverlay, type TimelineClip, type VisualTransform } from "./model";
 import fixWebmDuration from "fix-webm-duration";
 
 export interface RenderPreflight {
@@ -79,24 +79,51 @@ function waitForEvent(target: EventTarget, eventName: string, signal: AbortSigna
   });
 }
 
-function drawVideo(context: CanvasRenderingContext2D, video: HTMLVideoElement, width: number, height: number, opacity = 1) {
-  context.fillStyle = "#000000";
-  context.fillRect(0, 0, width, height);
+function drawVideo(
+  context: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+  transform: VisualTransform,
+  opacity = 1,
+  clear = true,
+) {
+  if (clear) {
+    context.fillStyle = "#000000";
+    context.fillRect(0, 0, width, height);
+  }
   const sourceRatio = video.videoWidth / video.videoHeight;
   const outputRatio = width / height;
   let drawWidth = width;
   let drawHeight = height;
-  if (sourceRatio > outputRatio) drawHeight = width / sourceRatio;
-  else drawWidth = height * sourceRatio;
+  if (transform.fit === "contain") {
+    if (sourceRatio > outputRatio) drawHeight = width / sourceRatio;
+    else drawWidth = height * sourceRatio;
+  } else if (sourceRatio > outputRatio) drawWidth = height * sourceRatio;
+  else drawHeight = width / sourceRatio;
+  drawWidth *= transform.scale;
+  drawHeight *= transform.scale;
+  const overflowX = Math.max(0, drawWidth - width);
+  const overflowY = Math.max(0, drawHeight - height);
+  const x = (width - drawWidth) / 2 - (transform.positionX / 100) * (overflowX / 2);
+  const y = (height - drawHeight) / 2 - (transform.positionY / 100) * (overflowY / 2);
   context.save();
   context.globalAlpha = opacity;
-  context.drawImage(video, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+  context.drawImage(video, x, y, drawWidth, drawHeight);
   context.restore();
 }
 
 function clipOpacity(clip: TimelineClip, elapsedMs: number) {
   const duration = clipDuration(clip);
   let opacity = 1;
+  if (clip.visualFadeInMs > 0) opacity *= Math.min(1, elapsedMs / clip.visualFadeInMs);
+  if (clip.visualFadeOutMs > 0) opacity *= Math.min(1, (duration - elapsedMs) / clip.visualFadeOutMs);
+  return Math.max(0, Math.min(1, opacity));
+}
+
+function brollOpacity(clip: BrollClip, elapsedMs: number) {
+  const duration = brollDuration(clip);
+  let opacity = clip.opacity;
   if (clip.visualFadeInMs > 0) opacity *= Math.min(1, elapsedMs / clip.visualFadeInMs);
   if (clip.visualFadeOutMs > 0) opacity *= Math.min(1, (duration - elapsedMs) / clip.visualFadeOutMs);
   return Math.max(0, Math.min(1, opacity));
@@ -167,7 +194,7 @@ export async function renderProjectLocally(options: {
   const { project, assetUrls, signal, onProgress } = options;
   const preflight = inspectLocalRender(project);
   if (!preflight.supported || !preflight.mimeType) throw new Error(preflight.warnings[0] ?? "Local rendering is unavailable.");
-  const missing = project.clips.find((clip) => !assetUrls[clip.assetId]);
+  const missing = [...project.clips, ...project.brollClips].find((clip) => !assetUrls[clip.assetId]);
   if (missing) throw new Error(`Relink ${missing.name} before rendering.`);
 
   const canvas = document.createElement("canvas");
@@ -194,6 +221,17 @@ export async function renderProjectLocally(options: {
     if (event.data.size) chunks.push(event.data);
   };
   const stopped = new Promise<void>((resolve) => recorder.addEventListener("stop", () => resolve(), { once: true }));
+  const brollVideos = new Map<string, { video: HTMLVideoElement; active: boolean }>();
+  for (const clip of project.brollClips) {
+    const video = document.createElement("video");
+    video.src = assetUrls[clip.assetId];
+    video.preload = "auto";
+    video.playsInline = true;
+    video.muted = true;
+    video.crossOrigin = "anonymous";
+    if (video.readyState < 1) await waitForEvent(video, "loadedmetadata", signal);
+    brollVideos.set(clip.id, { video, active: false });
+  }
   recorder.start(1_000);
 
   let timelineMs = 0;
@@ -220,8 +258,30 @@ export async function renderProjectLocally(options: {
           if (signal.aborted) throw new DOMException("Render cancelled.", "AbortError");
           const elapsedMs = Math.max(0, video.currentTime * 1_000 - clip.sourceInMs);
           gain.gain.value = clipGain(clip, elapsedMs);
-          drawVideo(context, video, preflight.width, preflight.height, clipOpacity(clip, elapsedMs));
-          for (const overlay of activeOverlays(project, timelineMs + elapsedMs)) {
+          const projectTimeMs = timelineMs + elapsedMs;
+          drawVideo(context, video, preflight.width, preflight.height, clip.transform, clipOpacity(clip, elapsedMs));
+          const topBroll = activeBrollClips(project, projectTimeMs).at(-1) ?? null;
+          for (const broll of project.brollClips) {
+            const runtime = brollVideos.get(broll.id);
+            if (!runtime) continue;
+            if (topBroll?.id !== broll.id) {
+              if (runtime.active) {
+                runtime.video.pause();
+                runtime.active = false;
+              }
+              continue;
+            }
+            const brollElapsedMs = projectTimeMs - broll.timelineStartMs;
+            const expectedSeconds = (broll.sourceInMs + brollElapsedMs) / 1_000;
+            if (!runtime.active || Math.abs(runtime.video.currentTime - expectedSeconds) > .25) {
+              runtime.video.currentTime = expectedSeconds;
+              if (runtime.video.seeking) await waitForEvent(runtime.video, "seeked", signal);
+              await runtime.video.play();
+              runtime.active = true;
+            }
+            drawVideo(context, runtime.video, preflight.width, preflight.height, broll.transform, brollOpacity(broll, brollElapsedMs), false);
+          }
+          for (const overlay of activeOverlays(project, projectTimeMs)) {
             drawOverlay(context, overlay, preflight.width, preflight.height);
           }
           const renderedMs = Math.min(preflight.durationMs, timelineMs + elapsedMs);
@@ -247,6 +307,11 @@ export async function renderProjectLocally(options: {
   } catch (error) {
     failure = error;
   } finally {
+    for (const { video } of brollVideos.values()) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
     if (recorder.state !== "inactive") recorder.stop();
     await stopped;
     canvasStream.getTracks().forEach((track) => track.stop());

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VideoStitch settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options-page">
+    <main class="options-card">
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div><strong>VideoStitch settings</strong><small>EXTENSION DESTINATION</small></div>
+      </header>
+      <h1>Choose your editor.</h1>
+      <p>Use the local preview while developing, or enter the HTTPS URL of your deployed VideoStitch web app.</p>
+      <form id="settings-form">
+        <label for="app-url">VideoStitch URL</label>
+        <input id="app-url" name="app-url" type="url" required placeholder="http://localhost:4173" />
+        <small>Only this URL is stored. API keys and project data are never extension settings.</small>
+        <div class="form-actions"><span id="save-status" role="status"></span><button class="primary" type="submit">Save destination</button></div>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
